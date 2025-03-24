@@ -92,8 +92,8 @@ GET /ads
 - **Response:**
 ```json
 {
-  "status": "success",
-  "message": "Click registered"
+"message": "Click event received",
+"status": "success"
 }
 ```
 
