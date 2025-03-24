@@ -1,4 +1,4 @@
-# Ad Tracking API
+# Ad Tracking APP
 
 This API is built using GoLang with Redis, Kafka, and SQL for managing and tracking video advertisements. It handles real-time metrics for ads (click count, CTR) and periodically updates the SQL database for long-term storage. Additionally, the API ensures robustness and handles high traffic efficiently.
 
