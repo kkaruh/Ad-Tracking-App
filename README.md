@@ -208,23 +208,7 @@ VALUES
 # Install dependencies
 go mod tidy
 
-# Set Environment Variables (Linux & macOS)
-export PROFILE=dev
-export SQL_SDN="your_sql_connection"
-export PORT=8080
-export REDIS_URI="your_redis_connection"
-export KAFKA_URI="your_kafka_connection"
-export LOG_PATH="/logs/app.log"
-
-# Set Environment Variables (Windows)
-set PROFILE=dev
-set SQL_SDN="your_sql_connection"
-set PORT=8080
-set REDIS_URI="your_redis_connection"
-set KAFKA_URI="your_kafka_connection"
-set LOG_PATH="/logs/app.log"
-
-# Alternatively, create a properties.env file with variables:
+# Alternatively, create a {production,development}.env file with variables:
 # PROFILE=dev
 # SQL_SDN=your_sql_connection
 # PORT=8080
@@ -259,8 +243,8 @@ CMD ["/app/adds_app"]
 
 **Build and Run:**
 ```bash
-docker build --build-arg PROFILE=prod --build-arg SQL_SDN="your_sql_connection" --build-arg PORT=8080 --build-arg REDIS_URI="your_redis_connection" --build-arg KAFKA_URI="your_kafka_connection" --build-arg LOG_PATH="/logs/app.log" -t ad-tracking-api .
-docker run -p 8080:8080 ad-tracking-api
+docker build -t ad-tracking-api .
+docker run -e PROFILE=production -e SQL_SDN="your_sql_connection" -e PORT=8080 -e REDIS_URI="your_redis_connection" -e KAFKA_URI="your_kafka_connection" -e LOG_PATH="/logs/app.log" ad-tracking-api
 ```
 
 ---
