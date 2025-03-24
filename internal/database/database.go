@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"log"
 	"os"
+	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 )
@@ -24,6 +25,9 @@ func ConnectSql(trigger chan bool) {
 		log.Fatal("⛒ Unable to Ping the  Database")
 		log.Fatal(err)
 	}
+	db.SetMaxOpenConns(100)
+	db.SetMaxIdleConns(50)
+	db.SetConnMaxLifetime(time.Minute * 5)
 	Database = db
 	log.Println("⛁ Connected to Database")
 	trigger <- true

@@ -6,6 +6,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"sync"
 
 	"log"
 	"net/http"
@@ -47,7 +49,6 @@ func GetAds(ctx *gin.Context) {
 		ctx.JSON(500, gin.H{"error": "Failed to fetch ads"})
 		return
 	}
-	log.Println("Data fetched from the DB")
 	defer rows.Close()
 
 	var ads []Ad
@@ -59,7 +60,6 @@ func GetAds(ctx *gin.Context) {
 		}
 		ads = append(ads, ad)
 	}
-	fmt.Println("Data stored successfully in Redis.")
 	if err = rows.Err(); err != nil {
 		log.Println("Error in rows iteration:", err)
 		ctx.JSON(500, gin.H{"error": "Error processing results"})
@@ -84,38 +84,51 @@ func PostAdds(ctx *gin.Context) {
 	var clickEvent ClickEvent
 	if err := ctx.ShouldBindJSON(&clickEvent); err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input"})
-		log.Println(err)
 		return
 	}
 	valid, error := validateInput(clickEvent)
 	if !valid {
 		panic(error)
 	}
-
 	clickEvent.Timestamp = time.Now().Format(time.RFC3339)
-	go updateMetricsInRedis(fmt.Sprint(clickEvent.AddId), clickEvent.Timeframe, clickEvent.PlaybackTime)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		updateMetricsInRedis(fmt.Sprint(clickEvent.AddId), clickEvent.Timeframe, clickEvent.PlaybackTime)
+		defer wg.Done()
+	}()
+
 	eventJSON, err := json.Marshal(clickEvent)
 	if err != nil {
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to encode event"})
 		return
 	}
-	err = config.KafkaWriter.WriteMessages(context.Background(),
-		kafka.Message{
-			Key:   []byte(fmt.Sprint(clickEvent.AddId)),
-			Value: eventJSON,
-		},
-	)
-	if err != nil {
+	pushchan := make(chan bool)
+	go func() {
+		err = config.KafkaWriter.WriteMessages(context.Background(),
+			kafka.Message{
+				Key:   []byte(fmt.Sprint(clickEvent.AddId)),
+				Value: eventJSON,
+			},
+		)
+		if err != nil {
+			pushchan <- false
+			return
+		}
+		log.Println("Pushed to Kafka")
+		pushchan <- true
+	}()
+	if !<-pushchan {
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to send to Kafka"})
 		return
 	}
-
 	ctx.JSON(http.StatusOK, gin.H{"status": "success", "message": "Click event received"})
+	wg.Wait()
 }
 
 func KafkaConsumer(trigger chan bool) {
 	reader := kafka.NewReader(kafka.ReaderConfig{
-		Brokers:  []string{"localhost:9092"},
+		Brokers:  []string{os.Getenv("KAFKA_URI")},
 		Topic:    "adds-stream",
 		GroupID:  "adds-stream-group",
 		MinBytes: 1,
@@ -129,7 +142,7 @@ func KafkaConsumer(trigger chan bool) {
 		for {
 			message, err := reader.ReadMessage(context.Background())
 			if err != nil {
-				log.Fatal(err)
+				log.Println(err)
 			}
 			var clickEvent ClickEvent
 			if err := json.Unmarshal(message.Value, &clickEvent); err != nil {
@@ -137,20 +150,56 @@ func KafkaConsumer(trigger chan bool) {
 				continue
 			}
 			log.Printf("Inserting into the database")
-			InsertClick(clickEvent)
+			var wg sync.WaitGroup
+			insert := make(chan bool, 1)
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if <-InsertClick(clickEvent, insert) {
+					updateMetaClicks(clickEvent.AddId, insert)
+					<-insert
+				}
+			}()
+			log.Println("DB updation Done")
+			wg.Wait()
+			close(insert)
+
 		}
 	}()
 
 }
-
-func InsertClick(event ClickEvent) {
+func updateMetaClicks(adID int, insert chan bool) {
+	tx, err := database.Database.Begin()
+	if err != nil {
+		log.Println("Failed to begin transaction:", err)
+		return
+	}
+	log.Println("Incrementing Clicks")
+	_, err = tx.Exec("UPDATE metadata_ads SET clicks = clicks + 1 WHERE id = ?", adID)
+	if err != nil {
+		log.Println("Failed to insert clicks data:", err)
+		tx.Rollback()
+		return
+	}
+	err = tx.Commit()
+	if err != nil {
+		log.Println("Failed to commit transaction:", err)
+		return
+	}
+	log.Println("Incremented Clicks")
+	insert <- true
+}
+func InsertClick(event ClickEvent, insert chan bool) chan bool {
 	query := "INSERT INTO ads_clicks (id, ip, timestamp, timeframe) VALUES (?, ?, ?, ?)"
 	_, err := database.Database.Exec(query, event.AddId, event.Ip, event.Timestamp, event.Timeframe)
 	if err != nil {
 		log.Printf("Failed to insert click event: %v", err)
-		return
+		insert <- false
+		return insert
 	}
 	log.Println("Cick event inserted successfully")
+	insert <- true
+	return insert
 }
 
 func updateMetricsInRedis(adID string, timeframe float64, playbacktime float64) {
@@ -218,7 +267,7 @@ func FetchFromDb(started chan<- bool) {
 
 	rows, err := database.Database.Query(query)
 	if err != nil {
-		log.Fatal("Failed to execute query:", err)
+		log.Println("Failed to execute query:", err)
 	}
 	defer rows.Close()
 
@@ -248,7 +297,7 @@ func FetchFromDb(started chan<- bool) {
 	}
 
 	if err := rows.Err(); err != nil {
-		log.Fatal("Error iterating rows:", err)
+		log.Println("Error iterating rows:", err)
 	}
 	fmt.Println("Fetched Ads completed")
 	started <- true
@@ -283,6 +332,9 @@ func GetAnalytics(ctx *gin.Context) {
 		return
 	}
 	ctr := int((click / impress) * 100)
+	if ctr < 0 {
+		ctr = 0
+	}
 	ctx.JSON(http.StatusOK, gin.H{
 		"ad_id":      adID,
 		"clicks":     click, //adds ,user
@@ -294,25 +346,19 @@ func GetAnalytics(ctx *gin.Context) {
 func FlushMetricsToSQL(adID string, isInserted chan bool) {
 	time_key := fmt.Sprintf("time-%s", adID[3:])
 	log.Println("Started Flushing for id ", adID, time_key)
-
-	// Get clicks and timestamps
 	clicks, err := config.RedisClient.HGetAll(config.Ctx, adID).Result()
 	if err != nil {
-		log.Fatal(err)
+		log.Println(err)
 	}
-	// time_map, err := config.RedisClient.HGetAll(config.Ctx, time_key).Result()
 	if len(clicks) == 0 {
 		isInserted <- true
 	}
-	// Insert data into SQL
 	tx, err := database.Database.Begin()
 	if err != nil {
 		log.Println("Failed to begin transaction:", err)
 		return
 	}
-
 	log.Println("Clicks found", clicks)
-	// Insert Clicks Data
 	_, err = tx.Exec("INSERT INTO metadata_ads (id, clicks) VALUES (?, ?) ON DUPLICATE KEY UPDATE clicks = ?",
 		adID[3:], clicks["clicks"], clicks["clicks"])
 	if err != nil {
